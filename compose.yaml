@@ -1,0 +1,75 @@
+name: pulse
+services:
+  mongo:
+    image: mongo:7.0
+    command: ["mongod", "--replSet", "rs0", "--bind_ip_all"]
+    ports: ["127.0.0.1:27017:27017"]
+    volumes: ["mongo-data:/data/db"]
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+  mongo-init:
+    image: mongo:7.0
+    depends_on:
+      mongo: {condition: service_healthy}
+    volumes: ["./infra/mongo/init.sh:/scripts/init.sh:ro"]
+    entrypoint: ["bash", "/scripts/init.sh"]
+    restart: "no"
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports: ["127.0.0.1:6379:6379"]
+    volumes: ["redis-data:/data"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  clickhouse:
+    image: clickhouse/clickhouse-server:25.3-alpine
+    environment:
+      CLICKHOUSE_DB: ${CLICKHOUSE_DATABASE:-gym}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-gym}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-gym-dev-password}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    ports: ["127.0.0.1:8123:8123"]
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+      - ./infra/clickhouse/init.sql:/docker-entrypoint-initdb.d/001-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8123/ping | grep -q Ok"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+  backend:
+    build: ./backend
+    environment:
+      ENVIRONMENT: development
+      PORT: 3000
+      FRONTEND_ORIGIN: http://localhost:${FRONTEND_PORT:-8080}
+      MONGODB_URI: mongodb://mongo:27017/pulse?replicaSet=rs0
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: ${JWT_SECRET:-local-development-only-replace-with-at-least-32-random-characters}
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-gym}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-gym-dev-password}
+      CLICKHOUSE_DATABASE: ${CLICKHOUSE_DATABASE:-gym}
+    ports: ["127.0.0.1:3000:3000"]
+    depends_on:
+      mongo-init: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+      clickhouse: {condition: service_healthy}
+    restart: unless-stopped
+  frontend:
+    build: ./frontend
+    environment:
+      API_URL: http://backend:3000
+    ports: ["127.0.0.1:${FRONTEND_PORT:-8080}:8080"]
+    depends_on: [backend]
+    restart: unless-stopped
+volumes:
+  mongo-data:
+  redis-data:
+  clickhouse-data:
